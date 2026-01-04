@@ -8,6 +8,8 @@ import shutil
 MAX_SIZE_KB = 256
 TARGET_DIMENSION = 512
 SAFE_BITRATE_FACTOR = 0.75 # Lowered to 75% to safer size targets
+MAX_FPS = 30
+MAX_DURATION_SEC = 3.0
 
 def find_tool(tool_name):
     """Finds the tool executable in the script's directory or subdirectories."""
@@ -49,7 +51,16 @@ def get_video_info(ffprobe_path, file_path):
         width = int(video_stream['width'])
         height = int(video_stream['height'])
         
-        return duration, width, height
+        # Get FPS (frame rate)
+        fps_str = video_stream.get('r_frame_rate', '30/1')
+        try:
+            num, den = map(int, fps_str.split('/'))
+            fps = num / den if den != 0 else 30.0
+        except:
+            fps = 30.0
+
+        return duration, width, height, fps
+
     except Exception as e:
         print(f"Error analyzing video: {e}")
         sys.exit(1)
@@ -98,13 +109,22 @@ def compress_video(ffmpeg_path, input_path):
         return
 
     print(f"Analyzing {filename}...")
-    duration, width, height = get_video_info(ffprobe_path, input_path)
+    duration, width, height, fps = get_video_info(ffprobe_path, input_path)
     
     new_w, new_h, bitrate_k = calculate_target_details(duration, width, height)
+
+    # Smart FPS: Keep original if <= 30, otherwise cap at 30
+    target_fps = fps if fps <= MAX_FPS else MAX_FPS
     
     print(f"  Duration: {duration:.2f}s")
     print(f"  Original Size: {width}x{height}")
     print(f"  Target Size:   {new_w}x{new_h}")
+    print(f"  FPS:           {target_fps:.2f} (Original: {fps:.2f})")
+    
+    # Validation Warnings 
+    if duration > MAX_DURATION_SEC:
+        print(f"  [WARNING] Duration {duration:.2f}s > {MAX_DURATION_SEC}s. Telegram may reject this sticker.")
+    
     # print(f"  Target Bitrate: {bitrate_k}k") # Printed in loop now
     
     # 2-Pass Encoding Loop for strict size compliance
@@ -120,8 +140,10 @@ def compress_video(ffmpeg_path, input_path):
             "-i", input_path,
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
+            "-r", str(target_fps),
             "-b:v", f"{current_bitrate}k",
             "-vf", f"scale={new_w}:{new_h}",
+            "-row-mt", "1",
             "-an",
             "-map_metadata", "-1",
             "-pass", "1",
@@ -135,8 +157,10 @@ def compress_video(ffmpeg_path, input_path):
             "-i", input_path,
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
+            "-r", str(target_fps),
             "-b:v", f"{current_bitrate}k",
             "-vf", f"scale={new_w}:{new_h}",
+            "-row-mt", "1", 
             "-an",
             "-map_metadata", "-1",
             "-pass", "2",
