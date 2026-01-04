@@ -1,0 +1,7 @@
+ffmpeg-8.0.1-essentials_build/
+python_embed/
+__pycache__/
+*.pyc
+/dist/
+/build/
+*.spec
