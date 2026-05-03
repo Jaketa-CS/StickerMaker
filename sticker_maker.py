@@ -111,28 +111,92 @@ def compress_video(ffmpeg_path, input_path):
     print(f"Analyzing {filename}...")
     duration, width, height, fps = get_video_info(ffprobe_path, input_path)
     
-    new_w, new_h, bitrate_k = calculate_target_details(duration, width, height)
-
-    # Build video filter chain - explicitly handle alpha for GIFs
-    # 1. format=rgba - keeps alpha channel from source
-    # 2. scale - downscale to target dimensions
-    # 3. split/erosion/alphamerge - erode alpha by 1px at FINAL resolution to remove white GIF fringe
-    # 4. format=yuva420p - convert to VP9 alpha format
-    vf_chain = f"format=rgba,scale={new_w}:{new_h}:flags=lanczos,split[rgb][a];[a]alphaextract,erosion[ae];[rgb][ae]alphamerge,format=yuva420p"
-
     # Smart FPS: Keep original if <= 30, otherwise cap at 30
     target_fps = fps if fps <= MAX_FPS else MAX_FPS
     
     print(f"  Duration: {duration:.2f}s")
     print(f"  Original Size: {width}x{height}")
-    print(f"  Target Size:   {new_w}x{new_h}")
     print(f"  FPS:           {target_fps:.2f} (Original: {fps:.2f})")
     
-    # Validation Warnings 
-    if duration > MAX_DURATION_SEC:
-        print(f"  [WARNING] Duration {duration:.2f}s > {MAX_DURATION_SEC}s. Telegram may reject this sticker.")
+    # Duration handling - give user options if over limit
+    duration_choice = None  # None = no change, 'speed' = speed up, 'trim' = trim, 'cut' = custom cut
+    effective_duration = duration
+    cut_start = 0
     
-    # print(f"  Target Bitrate: {bitrate_k}k") # Printed in loop now
+    if duration > MAX_DURATION_SEC:
+        speed_factor = duration / MAX_DURATION_SEC
+        print(f"\n  [!] Duration {duration:.2f}s exceeds Telegram's {MAX_DURATION_SEC}s limit.")
+        print(f"  What would you like to do?")
+        print(f"    1) Speed up {speed_factor:.1f}x to fit in {MAX_DURATION_SEC}s")
+        print(f"    2) Trim to the first {MAX_DURATION_SEC}s")
+        print(f"    3) Custom cut (pick start & end time)")
+        print(f"    4) Keep as-is (Telegram may reject it)")
+        
+        while True:
+            choice = input("  Enter choice (1/2/3/4): ").strip()
+            if choice == '1':
+                duration_choice = 'speed'
+                effective_duration = MAX_DURATION_SEC
+                print(f"  -> Speeding up {speed_factor:.1f}x")
+                break
+            elif choice == '2':
+                duration_choice = 'trim'
+                effective_duration = MAX_DURATION_SEC
+                print(f"  -> Trimming to first {MAX_DURATION_SEC}s")
+                break
+            elif choice == '3':
+                duration_choice = 'cut'
+                print(f"\n  Timeline: 0.00s -------- {duration:.2f}s")
+                while True:
+                    try:
+                        start_input = input(f"  Start time in seconds [0.00]: ").strip()
+                        cut_start = float(start_input) if start_input else 0.0
+                        end_input = input(f"  End time in seconds [{duration:.2f}]: ").strip()
+                        cut_end = float(end_input) if end_input else duration
+                        
+                        cut_len = cut_end - cut_start
+                        if cut_start < 0 or cut_end > duration or cut_start >= cut_end:
+                            print(f"  Invalid range. Start must be before end, within 0-{duration:.2f}s.")
+                            continue
+                        if cut_len > MAX_DURATION_SEC:
+                            print(f"  [!] Selection is {cut_len:.2f}s, still over {MAX_DURATION_SEC}s limit.")
+                            print(f"  (Telegram will likely reject it.) RESUME? (y/n)")
+                            if input("  ").strip().lower() != 'y':
+                                continue
+                        
+                        effective_duration = cut_len
+                        print(f"  -> Cutting to {cut_start:.2f}s - {cut_end:.2f}s ({cut_len:.2f}s)")
+                        break
+                    except ValueError:
+                        print("  Please enter a valid number.")
+                break
+            elif choice == '4':
+                print(f"  -> Keeping original duration")
+                break
+            else:
+                print("  Invalid choice. Enter 1, 2, 3, or 4.")
+    
+    new_w, new_h, bitrate_k = calculate_target_details(effective_duration, width, height)
+    print(f"  Target Size:   {new_w}x{new_h}")
+
+    # Build video filter chain
+    vf_parts = ["format=rgba"]
+    
+    # Add speed-up filter if chosen (setpts changes presentation timestamps)
+    if duration_choice == 'speed':
+        speed_factor = duration / MAX_DURATION_SEC
+        vf_parts.append(f"setpts=PTS/{speed_factor:.4f}")
+    
+    vf_parts.append(f"scale={new_w}:{new_h}:flags=lanczos")
+    vf_parts.append("format=yuva420p")
+    vf_chain = ",".join(vf_parts)
+    
+    # Trim/cut args (applied in ffmpeg command, not filter chain)
+    trim_args = []
+    if duration_choice == 'trim':
+        trim_args = ["-t", str(MAX_DURATION_SEC)]
+    elif duration_choice == 'cut':
+        trim_args = ["-ss", str(cut_start), "-t", str(effective_duration)]
     
     # 2-Pass Encoding Loop for strict size compliance
     max_attempts = 3
@@ -145,6 +209,7 @@ def compress_video(ffmpeg_path, input_path):
         cmd_pass1 = [
             ffmpeg_path, "-y",
             "-i", input_path,
+        ] + trim_args + [
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
             "-r", str(target_fps),
@@ -156,13 +221,13 @@ def compress_video(ffmpeg_path, input_path):
             "-pass", "1",
             "-f", "null", "NUL"
         ]
-        subprocess.run(cmd_pass1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True) # Silence output for cleaner loop
+        subprocess.run(cmd_pass1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         
         # Pass 2
         cmd_pass2 = [
             ffmpeg_path, "-y",
             "-i", input_path,
-        
+        ] + trim_args + [
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
             "-r", str(target_fps),
