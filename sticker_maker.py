@@ -113,6 +113,13 @@ def compress_video(ffmpeg_path, input_path):
     
     new_w, new_h, bitrate_k = calculate_target_details(duration, width, height)
 
+    # Build video filter chain - explicitly handle alpha for GIFs
+    # 1. format=rgba - keeps alpha channel from source
+    # 2. scale - downscale to target dimensions
+    # 3. split/erosion/alphamerge - erode alpha by 1px at FINAL resolution to remove white GIF fringe
+    # 4. format=yuva420p - convert to VP9 alpha format
+    vf_chain = f"format=rgba,scale={new_w}:{new_h}:flags=lanczos,split[rgb][a];[a]alphaextract,erosion[ae];[rgb][ae]alphamerge,format=yuva420p"
+
     # Smart FPS: Keep original if <= 30, otherwise cap at 30
     target_fps = fps if fps <= MAX_FPS else MAX_FPS
     
@@ -142,7 +149,7 @@ def compress_video(ffmpeg_path, input_path):
             "-pix_fmt", "yuva420p",
             "-r", str(target_fps),
             "-b:v", f"{current_bitrate}k",
-            "-vf", f"scale={new_w}:{new_h}",
+            "-vf", vf_chain,
             "-row-mt", "1",
             "-an",
             "-map_metadata", "-1",
@@ -155,11 +162,12 @@ def compress_video(ffmpeg_path, input_path):
         cmd_pass2 = [
             ffmpeg_path, "-y",
             "-i", input_path,
+        
             "-c:v", "libvpx-vp9",
             "-pix_fmt", "yuva420p",
             "-r", str(target_fps),
             "-b:v", f"{current_bitrate}k",
-            "-vf", f"scale={new_w}:{new_h}",
+            "-vf", vf_chain,
             "-row-mt", "1", 
             "-an",
             "-map_metadata", "-1",
